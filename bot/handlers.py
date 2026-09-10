@@ -273,19 +273,60 @@ def _notion_error_text(exc: NotionError) -> str:
     return f"❌ Notion вернул ошибку:\n<code>{html.escape(str(exc)[:300])}</code>"
 
 
+#: Паузы между попытками доставить ответ, секунды. Провалы связи с Telegram
+#: длятся минутами, а ответ с кнопками — единственный способ выбрать
+#: категорию, поэтому ждём окно связи вместо того, чтобы сдаться за минуту.
+DELIVERY_DELAYS = (15, 30, 60, 120, 180, 300)
+
+
 async def _report(
     status: Message | None,
     fallback: Message,
     text: str,
     keyboard: InlineKeyboardMarkup | None = None,
 ) -> None:
-    try:
+    """Доставить ответ, переживая провалы связи.
+
+    Запись в Notion к этому моменту уже сохранена, теряется только ответ —
+    поэтому пробуем долго и в фоне, чтобы не держать обработчик.
+    """
+    async def attempt() -> None:
         if status:
             await status.edit_text(text, reply_markup=keyboard)
         else:
             await fallback.reply(text, reply_markup=keyboard)
-    except Exception:  # noqa: BLE001
-        log.warning("Не удалось отправить ответ пользователю", exc_info=True)
+
+    try:
+        await attempt()
+        return
+    except TelegramBadRequest as exc:
+        # Дело не в связи: сообщение слишком длинное, разметка битая и т.п.
+        # Повторять нечего, но и падать смысла нет — запись уже сохранена.
+        log.warning("Telegram отклонил ответ: %s", exc)
+        return
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Ответ не ушёл (%s), буду пробовать ещё", exc)
+
+    asyncio.create_task(_deliver_later(attempt))
+
+
+async def _deliver_later(attempt) -> None:
+    for delay in DELIVERY_DELAYS:
+        await asyncio.sleep(delay)
+        try:
+            await attempt()
+            log.info("Ответ доставлен со второй попытки, спустя паузу")
+            return
+        except TelegramBadRequest as exc:
+            log.warning("Ответ отклонён Telegram, повторять не буду: %s", exc)
+            return
+        except Exception as exc:  # noqa: BLE001
+            log.info("Ответ снова не ушёл (%s)", exc)
+
+    log.error(
+        "Ответ так и не доставлен. Запись в Notion на месте — "
+        "вызови /last, чтобы получить кнопки категорий"
+    )
 
 
 @router.callback_query(F.data.startswith(CALLBACK_PREFIX + ":"))
