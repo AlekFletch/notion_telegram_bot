@@ -33,6 +33,18 @@ BLOCK_SHAPES = {
 }
 
 
+async def _trash(notion: NotionClient, page_id: str) -> None:
+    """Убрать временную страницу в корзину.
+
+    Свойство archived в актуальной версии API больше не принимается, а сама
+    уборка не должна ронять проверку — поэтому ошибку просто проглатываем.
+    """
+    try:
+        await notion._request("DELETE", f"/blocks/{page_id}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"  [..] временную страницу удалить не вышло ({exc}); убери вручную")
+
+
 def ok(message: str) -> None:
     print(f"  [ok] {message}")
 
@@ -80,7 +92,7 @@ async def main() -> int:
                 continue
             working_shape = name
             ok(f"работает форма «{name}»")
-            await notion._request("PATCH", f"/blocks/{page_id}", json={"archived": True})
+            await _trash(notion, page_id)
             break
 
         if working_shape is None:
@@ -95,9 +107,9 @@ async def main() -> int:
         print("4. Полноценная запись")
         text = "Проверка бота: жирный, ссылка и код."
         entities = [
-            _Entity("bold", 16, 6),
-            _Entity("text_link", 24, 6, url="https://www.notion.so/"),
-            _Entity("code", 33, 3),
+            _entity_for(text, "жирный", "bold"),
+            _entity_for(text, "ссылка", "text_link", url="https://www.notion.so/"),
+            _entity_for(text, "код", "code"),
         ]
         blocks = fmt.message_blocks(text, entities)
         blocks.append(api.file_block("image", uploaded.id) if working_shape == "file_upload"
@@ -142,6 +154,20 @@ class _Entity:
         self.length = length
         self.url = url
         self.language = None
+
+
+def _utf16_len(text: str) -> int:
+    return len(text.encode("utf-16-le")) // 2
+
+
+def _entity_for(text: str, fragment: str, kind: str, url: str | None = None) -> _Entity:
+    """Сущность на кусок текста со смещением в UTF-16, как это делает Telegram.
+
+    Считаем из самого текста, а не руками: захардкоженные смещения ошибаются
+    на единицу незаметно, и потом кажется, будто виноват конвертер.
+    """
+    start = text.index(fragment)
+    return _Entity(kind, _utf16_len(text[:start]), _utf16_len(fragment), url=url)
 
 
 if __name__ == "__main__":
