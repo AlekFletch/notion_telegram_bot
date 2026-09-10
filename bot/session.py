@@ -67,27 +67,33 @@ class RetryingSession(AiohttpSession):
     ):
         super().__init__(*args, **kwargs)
         self._attempts = attempts
+        self._connect_timeout = connect_timeout
 
-        # aiogram отдаёт таймаут одним числом, а число aiohttp понимает как
-        # общий лимит — фаза подключения при этом не ограничена ничем. Когда
-        # канал до Telegram фильтруется, коннект висит целую минуту, и четыре
-        # повтора съедают четыре минуты. Ограничиваем отдельно: сорванная
-        # попытка должна стоить секунды, чтобы повтор имел смысл.
-        total = float(kwargs.get("timeout", args[0] if args else 60.0) or 60.0)
-        self.timeout = ClientTimeout(  # type: ignore[assignment]
+    def _deadline(self, timeout) -> ClientTimeout:
+        """Таймаут запроса с отдельно ограниченной фазой подключения.
+
+        aiogram отдаёт таймаут одним числом, а число aiohttp понимает как общий
+        лимит — коннект при этом не ограничен ничем. Когда канал до Telegram
+        фильтруется, подключение висит целую минуту, и повторы теряют смысл.
+        Само поле self.timeout при этом обязано остаться числом: aiogram
+        складывает его с таймаутом опроса (int(session.timeout + polling)).
+        """
+        total = float(timeout if timeout is not None else self.timeout)
+        return ClientTimeout(
             total=total,
-            connect=connect_timeout,
-            sock_connect=connect_timeout,
+            connect=self._connect_timeout,
+            sock_connect=self._connect_timeout,
         )
 
     async def make_request(self, bot, method, timeout=None):  # type: ignore[override]
         name = type(method).__name__
         attempts = 1 if _single_attempt.get() else self._attempts
+        deadline = self._deadline(timeout)
         last: Exception | None = None
 
         for attempt in range(1, attempts + 1):
             try:
-                return await super().make_request(bot, method, timeout=timeout)
+                return await super().make_request(bot, method, timeout=deadline)
 
             except TelegramRetryAfter as exc:
                 # Флуд-контроль Telegram: сервер прямо говорит, сколько ждать.

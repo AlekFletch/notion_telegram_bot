@@ -192,3 +192,35 @@ async def test_no_retry_flag_does_not_leak_between_tasks():
     await asyncio.gather(asyncio.create_task(neighbour()), asyncio.create_task(with_flag()))
 
     assert seen == [False, True]
+
+
+def test_session_timeout_stays_a_number():
+    """aiogram считает int(session.timeout + polling_timeout).
+
+    Если подменить это поле объектом ClientTimeout, опрос падает на первом
+    же цикле с TypeError — поймали ровно это.
+    """
+    from bot.session import RetryingSession
+
+    session = RetryingSession(timeout=90.0)
+
+    assert isinstance(session.timeout, (int, float))
+    assert int(session.timeout + 30) == 120
+
+
+def test_connect_phase_is_bounded_separately():
+    """Общий лимит щедрый (загрузка файлов), подключение — короткое."""
+    from bot.session import RetryingSession
+
+    session = RetryingSession(timeout=90.0, connect_timeout=10.0)
+
+    deadline = session._deadline(None)
+    assert deadline.total == 90.0
+    assert deadline.connect == 10.0
+    assert deadline.sock_connect == 10.0
+
+    # Явный таймаут запроса (его передаёт опрос) меняет общий лимит,
+    # но подключение остаётся ограниченным.
+    polling = session._deadline(120)
+    assert polling.total == 120.0
+    assert polling.connect == 10.0

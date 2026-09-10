@@ -45,7 +45,14 @@ def build_dispatcher(settings: Settings, notion: NotionClient) -> tuple[Dispatch
 
 
 async def run_polling(bot: Bot, dispatcher: Dispatcher) -> None:
-    await bot.delete_webhook(drop_pending_updates=False)
+    # Снятие вебхука обязательно только при переезде с него на опрос. Если
+    # связь сейчас лежит — не беда, опрос всё равно поднимется, когда сеть
+    # вернётся, а падать из-за этого вызова незачем.
+    try:
+        await bot.delete_webhook(drop_pending_updates=False)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Не удалось снять вебхук (%s) — продолжаем", exc)
+
     log.info("Режим long polling. Останов — Ctrl+C")
     await dispatcher.start_polling(bot, allowed_updates=dispatcher.resolve_used_update_types())
 
@@ -118,9 +125,19 @@ async def amain() -> int:
         await bot.session.close()
         await notion.aclose()
         return 1
+    except Exception as exc:  # noqa: BLE001 — сеть, а не отказ Notion
+        log.error("Не удалось связаться с Notion: %s", exc)
+        await bot.session.close()
+        await notion.aclose()
+        return 1
 
-    me = await bot.get_me()
-    log.info("Бот @%s запущен в режиме %s", me.username, settings.mode)
+    # Приветственная строка в логе — приятно, но не повод падать: обрыв связи
+    # на старте не должен убивать бота, опрос сам переживает такие провалы.
+    try:
+        me = await bot.get_me()
+        log.info("Бот @%s запущен в режиме %s", me.username, settings.mode)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Имя бота узнать не вышло (%s), продолжаем в режиме %s", exc, settings.mode)
 
     try:
         if settings.mode == "webhook":
