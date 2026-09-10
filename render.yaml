@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: telegram-notion-bot
+    runtime: docker
+    plan: free
+    region: frankfurt
+    # Health-check держит сервис живым и будит его после простоя.
+    healthCheckPath: /
+    envVars:
+      - key: MODE
+        value: webhook
+      # Секрет вебхука Render сгенерирует сам — вписывать ничего не нужно.
+      - key: WEBHOOK_SECRET
+        generateValue: true
+      # Значения ниже задаются вручную в Dashboard → Environment.
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: NOTION_TOKEN
+        sync: false
+      - key: NOTION_DATABASE_ID
+        sync: false
+      - key: ALLOWED_USER_IDS
+        sync: false
