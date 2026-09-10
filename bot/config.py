@@ -1,12 +1,17 @@
 """Настройки бота. Читаются из переменных окружения или файла .env."""
 from __future__ import annotations
 
+import hashlib
 import os
+import re
 from functools import cached_property
 from typing import Literal
 
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+#: Что Telegram разрешает в secret_token вебхука.
+_SAFE_SECRET = re.compile(r"[A-Za-z0-9_-]{1,256}")
 
 
 class Settings(BaseSettings):
@@ -54,6 +59,24 @@ class Settings(BaseSettings):
     @property
     def webhook_url(self) -> str:
         return f"{self.base_webhook_url.rstrip('/')}{self.webhook_path}"
+
+    @model_validator(mode="after")
+    def _normalize_secret(self) -> "Settings":
+        """Привести секрет вебхука к набору символов, который принимает Telegram.
+
+        Telegram допускает в secret_token только A-Z, a-z, 0-9, «_» и «-».
+        Render генерирует значение по своим правилам, и оно эти рамки нарушает —
+        setWebhook отвечает «secret token contains illegal characters» и
+        контейнер падает. Вместо того чтобы полагаться на удачу, непригодное
+        значение заменяем его хешем: он стабилен между перезапусками, состоит
+        из разрешённых символов и не раскрывает исходную строку.
+        """
+        secret = self.webhook_secret.strip()
+        if secret and not _SAFE_SECRET.fullmatch(secret):
+            self.webhook_secret = hashlib.sha256(secret.encode()).hexdigest()
+        else:
+            self.webhook_secret = secret
+        return self
 
     @model_validator(mode="after")
     def _check_webhook(self) -> "Settings":
