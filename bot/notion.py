@@ -40,6 +40,16 @@ class NotionError(RuntimeError):
 
 
 @dataclass
+class LatestPage:
+    """Свежая запись базы для команды /last."""
+
+    page_id: str
+    url: str
+    title: str
+    category: str | None = None
+
+
+@dataclass
 class Uploaded:
     """Успешно загруженный в Notion файл."""
 
@@ -213,6 +223,38 @@ class NotionClient:
 
         page = await self._request("POST", "/pages", json=payload)
         return page["id"], page.get("url", "")
+
+    async def latest(self) -> "LatestPage | None":
+        """Самая свежая запись базы — для команды /last."""
+        if not self.data_source_id:
+            raise RuntimeError("Сначала нужно вызвать prepare()")
+
+        result = await self._request(
+            "POST",
+            f"/data_sources/{self.data_source_id}/query",
+            json={
+                "sorts": [{"timestamp": "created_time", "direction": "descending"}],
+                "page_size": 1,
+            },
+        )
+        results = result.get("results") or []
+        if not results:
+            return None
+
+        page = results[0]
+        properties = page.get("properties", {})
+        title = "".join(
+            item.get("plain_text", "")
+            for item in (properties.get("Название", {}).get("title") or [])
+        )
+        selected = (properties.get("Категория") or {}).get("select")
+
+        return LatestPage(
+            page_id=page["id"],
+            url=page.get("url", ""),
+            title=title or "(без названия)",
+            category=(selected or {}).get("name"),
+        )
 
     async def set_select(self, page_id: str, property_name: str, value: str | None) -> None:
         """Проставить значение select-свойства уже созданной записи."""

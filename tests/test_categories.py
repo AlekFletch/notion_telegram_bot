@@ -117,3 +117,78 @@ def test_url_is_recovered_from_existing_keyboard():
 def test_url_recovery_tolerates_missing_markup():
     assert _url_from(None) == ""
     assert _url_from(FakeMessage(None)) == ""
+
+
+# --------------------------------------------------------------------------
+# Одноразовые отправки
+# --------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_no_retry_limits_to_single_attempt():
+    """Служебное «Сохраняю…» не должно догоняться повторами."""
+    import asyncio
+
+    from aiogram.exceptions import TelegramNetworkError
+
+    from bot.session import RetryingSession, no_retry
+
+    calls = 0
+
+    class Counting(RetryingSession):
+        async def make_request(self, bot, method, timeout=None):
+            nonlocal calls
+
+            async def boom(*_a, **_kw):
+                nonlocal calls
+                calls += 1
+                raise TelegramNetworkError(method=None, message="нет связи")
+
+            original = RetryingSession.__mro__[1].make_request
+            RetryingSession.__mro__[1].make_request = boom
+            try:
+                return await super().make_request(bot, method, timeout=timeout)
+            finally:
+                RetryingSession.__mro__[1].make_request = original
+
+    session = Counting(timeout=5.0, attempts=4)
+
+    class Method:
+        pass
+
+    # Внутри no_retry — ровно одна попытка.
+    calls = 0
+    with pytest.raises(TelegramNetworkError):
+        with no_retry():
+            await session.make_request(None, Method())
+    assert calls == 1
+
+    # Снаружи — полный набор повторов.
+    calls = 0
+    with pytest.raises(TelegramNetworkError):
+        await session.make_request(None, Method())
+    assert calls == 4
+
+    await session.close()
+
+
+@pytest.mark.asyncio
+async def test_no_retry_flag_does_not_leak_between_tasks():
+    """Флаг живёт в своей задаче и не влияет на соседние отправки."""
+    import asyncio
+
+    from bot.session import _single_attempt, no_retry
+
+    seen: list[bool] = []
+
+    async def neighbour():
+        await asyncio.sleep(0.01)
+        seen.append(_single_attempt.get())
+
+    async def with_flag():
+        with no_retry():
+            await asyncio.sleep(0.02)
+            seen.append(_single_attempt.get())
+
+    await asyncio.gather(asyncio.create_task(neighbour()), asyncio.create_task(with_flag()))
+
+    assert seen == [False, True]

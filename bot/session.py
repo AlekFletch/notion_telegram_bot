@@ -10,6 +10,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+from contextlib import contextmanager
+from contextvars import ContextVar
+
+from aiohttp import ClientTimeout
 
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.exceptions import (
@@ -26,6 +30,26 @@ RETRIABLE = (TelegramNetworkError, TelegramServerError)
 DEFAULT_ATTEMPTS = 4
 
 
+#: Флаг «эта отправка одноразовая». ContextVar копируется в дочернюю задачу
+#: при её создании, поэтому переключение внутри задачи не задевает соседние.
+_single_attempt: ContextVar[bool] = ContextVar("single_attempt", default=False)
+
+
+@contextmanager
+def no_retry():
+    """Отключить повторы для вызовов, которые незачем догонять.
+
+    Пример — служебное «Сохраняю…»: если оно не ушло сразу, то доедет уже
+    бессмысленным и повиснет на экране, потому что редактировать его будет
+    поздно.
+    """
+    token = _single_attempt.set(True)
+    try:
+        yield
+    finally:
+        _single_attempt.reset(token)
+
+
 def backoff(attempt: int) -> float:
     """Растущая пауза со случайным разбросом, чтобы не долбить сервер в такт."""
     return min(2 ** attempt, 16) * (0.5 + random.random() / 2)
@@ -34,39 +58,59 @@ def backoff(attempt: int) -> float:
 class RetryingSession(AiohttpSession):
     """AiohttpSession, повторяющая запрос при сетевом сбое."""
 
-    def __init__(self, *args, attempts: int = DEFAULT_ATTEMPTS, **kwargs):
+    def __init__(
+        self,
+        *args,
+        attempts: int = DEFAULT_ATTEMPTS,
+        connect_timeout: float = 10.0,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         self._attempts = attempts
 
+        # aiogram отдаёт таймаут одним числом, а число aiohttp понимает как
+        # общий лимит — фаза подключения при этом не ограничена ничем. Когда
+        # канал до Telegram фильтруется, коннект висит целую минуту, и четыре
+        # повтора съедают четыре минуты. Ограничиваем отдельно: сорванная
+        # попытка должна стоить секунды, чтобы повтор имел смысл.
+        total = float(kwargs.get("timeout", args[0] if args else 60.0) or 60.0)
+        self.timeout = ClientTimeout(  # type: ignore[assignment]
+            total=total,
+            connect=connect_timeout,
+            sock_connect=connect_timeout,
+        )
+
     async def make_request(self, bot, method, timeout=None):  # type: ignore[override]
         name = type(method).__name__
+        attempts = 1 if _single_attempt.get() else self._attempts
         last: Exception | None = None
 
-        for attempt in range(1, self._attempts + 1):
+        for attempt in range(1, attempts + 1):
             try:
                 return await super().make_request(bot, method, timeout=timeout)
 
             except TelegramRetryAfter as exc:
                 # Флуд-контроль Telegram: сервер прямо говорит, сколько ждать.
                 last = exc
-                if attempt == self._attempts:
+                if attempt == attempts:
                     break
                 log.warning("Telegram %s: флуд-контроль, пауза %s с", name, exc.retry_after)
                 await asyncio.sleep(exc.retry_after)
 
             except RETRIABLE as exc:
                 last = exc
-                if attempt == self._attempts:
+                if attempt == attempts:
                     break
                 delay = backoff(attempt)
                 log.warning(
                     "Telegram %s: %s. Повтор %d из %d через %.1f с",
-                    name, type(exc).__name__, attempt, self._attempts - 1, delay,
+                    name, type(exc).__name__, attempt, attempts - 1, delay,
                 )
                 await asyncio.sleep(delay)
 
         assert last is not None
-        log.error("Telegram %s: не удалось за %d попыток", name, self._attempts)
+        if attempts > 1:
+            log.error("Telegram %s: не удалось за %d попыток", name, attempts)
         raise last
 
 

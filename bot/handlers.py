@@ -1,6 +1,7 @@
 """Команды бота и обработка пересланных сообщений."""
 from __future__ import annotations
 
+import asyncio
 import html
 import logging
 
@@ -20,6 +21,7 @@ from bot.categories import CATEGORIES
 from bot.config import Settings
 from bot.notion import NotionClient, NotionError
 from bot.pipeline import SaveResult, Saver
+from bot.session import no_retry
 
 log = logging.getLogger(__name__)
 
@@ -35,6 +37,7 @@ HELP = (
     "• Под каждой записью — кнопки категорий. Можно нажать сразу, "
     "можно позже: сообщение с кнопками никуда не денется\n\n"
     "<b>Команды</b>\n"
+    "/last — последняя запись и кнопки категорий к ней\n"
     "/ping — проверить связь с Notion\n"
     "/id — показать твой Telegram ID\n"
     "/help — эта справка"
@@ -45,6 +48,9 @@ HELP = (
 #: «c:<индекс>:<32 hex страницы>» — с запасом.
 CALLBACK_PREFIX = "c"
 BUTTONS_PER_ROW = 2
+
+#: Сколько ждать отправку служебного «Сохраняю…», прежде чем махнуть рукой.
+STATUS_WAIT = 15.0
 
 
 def _keyboard(
@@ -146,6 +152,34 @@ async def ping(message: Message, settings: Settings, notion: NotionClient) -> No
     )
 
 
+@router.message(Command("last"))
+async def last_command(message: Message, settings: Settings, notion: NotionClient) -> None:
+    """Последняя сохранённая запись с кнопками категорий.
+
+    Спасательный круг на случай, когда ответ бота не дошёл из-за связи:
+    запись в Notion уже есть, а кнопки к ней вызываются заново.
+    """
+    if not _allowed(message, settings):
+        await _deny(message)
+        return
+
+    try:
+        latest = await notion.latest()
+    except NotionError as exc:
+        await message.answer(_notion_error_text(exc))
+        return
+
+    if latest is None:
+        await message.answer("В базе пока пусто.")
+        return
+
+    chosen = categories.index_of(latest.category) if latest.category else None
+    await message.answer(
+        f"🗂 Последняя запись: <b>{html.escape(latest.title)}</b>",
+        reply_markup=_keyboard(latest.url, latest.page_id, chosen),
+    )
+
+
 @router.message(F.text | F.caption | F.photo | F.video | F.document | F.audio | F.voice | F.animation | F.video_note | F.sticker)
 async def save_message(
     message: Message,
@@ -166,29 +200,54 @@ async def save_message(
 
 async def _save_and_reply(bot: Bot, messages: list[Message], saver: Saver) -> None:
     primary = messages[0]
-    status: Message | None = None
-    try:
-        status = await primary.reply("⏳ Сохраняю в Notion…")
-    except Exception:  # noqa: BLE001 — не смогли ответить, но сохранить всё равно надо
-        log.warning("Не удалось отправить статус-сообщение", exc_info=True)
+
+    # «Сохраняю…» — вещь косметическая, и её нельзя ставить на критический путь:
+    # при обрыве связи повторы этого сообщения задерживали само сохранение на
+    # минуты. Отправляем параллельно и не ждём.
+    status_task = asyncio.create_task(_send_status(primary))
 
     try:
         result = await saver.save(bot, messages)
     except NotionError as exc:
-        await _report(status, primary, _notion_error_text(exc))
+        await _report(await _status(status_task), primary, _notion_error_text(exc))
         return
     except Exception as exc:  # noqa: BLE001
         log.exception("Сохранение не удалось")
         await _report(
-            status, primary,
+            await _status(status_task), primary,
             f"⚠️ Не удалось сохранить: <code>{html.escape(str(exc)[:300])}</code>",
         )
         return
 
     await _report(
-        status, primary, _success_text(result),
+        await _status(status_task), primary, _success_text(result),
         _keyboard(result.url, result.page_id),
     )
+
+
+async def _send_status(message: Message) -> Message | None:
+    """Одна попытка без повторов: сообщение одноразовое, догонять его нечего."""
+    try:
+        with no_retry():
+            return await message.reply("⏳ Сохраняю в Notion…")
+    except Exception:  # noqa: BLE001
+        log.info("Статус-сообщение не ушло — не страшно, ответ придёт отдельным")
+        return None
+
+
+async def _status(task: asyncio.Task) -> Message | None:
+    """Забрать отправленный статус, чтобы отредактировать его в ответ.
+
+    Если к этому моменту он всё ещё в пути — отменяем: лучше прислать ответ
+    новым сообщением, чем оставить на экране вечное «Сохраняю…».
+    """
+    try:
+        return await asyncio.wait_for(task, timeout=STATUS_WAIT)
+    except asyncio.TimeoutError:
+        task.cancel()
+        return None
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _success_text(result: SaveResult) -> str:
