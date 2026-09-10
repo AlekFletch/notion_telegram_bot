@@ -34,6 +34,7 @@ class SaveResult:
     url: str
     title: str
     kind: str
+    page_id: str = ""          # нужен, чтобы потом проставить категорию
     duplicate: bool = False
     notes: list[str] = field(default_factory=list)
 
@@ -134,12 +135,7 @@ class Saver:
 
         existing = await self._notion.find_by_key(key)
         if existing:
-            return SaveResult(
-                url=existing,
-                title="",
-                kind="",
-                duplicate=True,
-            )
+            return SaveResult(url=existing, title="", kind="", duplicate=True)
 
         text, entities = collect_text(messages)
         media = [ref for ref in (tg_files.extract_media(m) for m in messages) if ref]
@@ -184,7 +180,9 @@ class Saver:
             await self._notion.append_blocks(page_id, part)
 
         log.info("Сохранено «%s» (%s) → %s", title, kind, page_url)
-        return SaveResult(url=page_url, title=title, kind=kind, notes=notes)
+        return SaveResult(
+            url=page_url, title=title, kind=kind, page_id=page_id, notes=notes
+        )
 
     # ------------------------------------------------------------------
 

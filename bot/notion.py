@@ -214,6 +214,14 @@ class NotionClient:
         page = await self._request("POST", "/pages", json=payload)
         return page["id"], page.get("url", "")
 
+    async def set_select(self, page_id: str, property_name: str, value: str | None) -> None:
+        """Проставить значение select-свойства уже созданной записи."""
+        await self._request(
+            "PATCH",
+            f"/pages/{page_id}",
+            json={"properties": {property_name: select_property(value)}},
+        )
+
     async def append_blocks(self, page_id: str, blocks: Sequence[dict]) -> None:
         """Дописать блоки в конец страницы (по 100 за запрос)."""
         for part in batched(list(blocks)):

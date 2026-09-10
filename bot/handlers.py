@@ -5,10 +5,18 @@ import html
 import logging
 
 from aiogram import Bot, F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandStart
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 
+from bot import categories
 from bot.albums import AlbumBuffer
+from bot.categories import CATEGORIES
 from bot.config import Settings
 from bot.notion import NotionClient, NotionError
 from bot.pipeline import SaveResult, Saver
@@ -23,7 +31,9 @@ HELP = (
     "голосовое — и оно станет отдельной страницей в базе Notion.\n\n"
     "• Форматирование, ссылки и код сохраняются\n"
     "• Из ссылки подтягиваю заголовок и текст статьи\n"
-    "• Повторная пересылка того же сообщения не создаёт дубль\n\n"
+    "• Повторная пересылка того же сообщения не создаёт дубль\n"
+    "• Под каждой записью — кнопки категорий. Можно нажать сразу, "
+    "можно позже: сообщение с кнопками никуда не денется\n\n"
     "<b>Команды</b>\n"
     "/ping — проверить связь с Notion\n"
     "/id — показать твой Telegram ID\n"
@@ -31,12 +41,42 @@ HELP = (
 )
 
 
-def _keyboard(url: str) -> InlineKeyboardMarkup | None:
-    if not url:
-        return None
-    return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="Открыть в Notion", url=url)]]
-    )
+#: Префикс callback_data. Вся строка обязана уместиться в 64 байта:
+#: «c:<индекс>:<32 hex страницы>» — с запасом.
+CALLBACK_PREFIX = "c"
+BUTTONS_PER_ROW = 2
+
+
+def _keyboard(
+    url: str,
+    page_id: str = "",
+    chosen: int | None = None,
+) -> InlineKeyboardMarkup | None:
+    """Кнопки под сохранённой записью: категории плюс ссылка на Notion.
+
+    Выбранная категория помечается галочкой и остаётся на месте — передумал,
+    нажал другую, значение перезапишется.
+    """
+    rows: list[list[InlineKeyboardButton]] = []
+
+    if page_id:
+        short = page_id.replace("-", "")
+        buttons = [
+            InlineKeyboardButton(
+                text=("✓ " + category.name) if index == chosen else category.button,
+                callback_data=f"{CALLBACK_PREFIX}:{index}:{short}",
+            )
+            for index, category in enumerate(CATEGORIES)
+        ]
+        rows = [
+            buttons[i:i + BUTTONS_PER_ROW]
+            for i in range(0, len(buttons), BUTTONS_PER_ROW)
+        ]
+
+    if url:
+        rows.append([InlineKeyboardButton(text="Открыть в Notion", url=url)])
+
+    return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
 
 
 def _allowed(message: Message, settings: Settings) -> bool:
@@ -145,7 +185,10 @@ async def _save_and_reply(bot: Bot, messages: list[Message], saver: Saver) -> No
         )
         return
 
-    await _report(status, primary, _success_text(result), _keyboard(result.url))
+    await _report(
+        status, primary, _success_text(result),
+        _keyboard(result.url, result.page_id),
+    )
 
 
 def _success_text(result: SaveResult) -> str:
@@ -184,6 +227,59 @@ async def _report(
             await fallback.reply(text, reply_markup=keyboard)
     except Exception:  # noqa: BLE001
         log.warning("Не удалось отправить ответ пользователю", exc_info=True)
+
+
+@router.callback_query(F.data.startswith(CALLBACK_PREFIX + ":"))
+async def choose_category(
+    query: CallbackQuery,
+    settings: Settings,
+    notion: NotionClient,
+) -> None:
+    """Нажатие на кнопку категории под сохранённой записью."""
+    user = query.from_user
+    if not settings.setup_mode and (not user or user.id not in settings.allowed_ids):
+        await query.answer("Этот бот личный.", show_alert=True)
+        return
+
+    try:
+        _, raw_index, page_id = (query.data or "").split(":", 2)
+        category = categories.by_index(int(raw_index))
+    except (ValueError, TypeError):
+        category = None
+
+    if category is None:
+        await query.answer("Неизвестная категория", show_alert=True)
+        return
+
+    try:
+        await notion.set_select(page_id, categories.PROPERTY, category.name)
+    except NotionError as exc:
+        log.warning("Не удалось проставить категорию: %s", exc)
+        await query.answer("Notion не принял категорию", show_alert=True)
+        return
+
+    await query.answer(f"Категория: {category.name}")
+
+    # Перерисовываем клавиатуру с галочкой. Если пользователь нажал ту же
+    # кнопку повторно, Telegram ответит «message is not modified» — не ошибка.
+    url = _url_from(query.message)
+    try:
+        await query.message.edit_reply_markup(
+            reply_markup=_keyboard(url, page_id, int(raw_index))
+        )
+    except TelegramBadRequest as exc:
+        if "not modified" not in str(exc).lower():
+            log.warning("Не удалось обновить клавиатуру: %s", exc)
+
+
+def _url_from(message: Message | None) -> str:
+    """Достать ссылку на Notion из уже отправленной клавиатуры."""
+    markup = getattr(message, "reply_markup", None)
+    for row in getattr(markup, "inline_keyboard", []) or []:
+        for button in row:
+            if button.url:
+                return button.url
+    return ""
 
 
 async def _deny(message: Message) -> None:
