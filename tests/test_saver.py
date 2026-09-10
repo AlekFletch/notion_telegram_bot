@@ -246,3 +246,29 @@ async def test_formatting_survives_to_notion_payload():
     items = blocks_of(notion)[0]["paragraph"]["rich_text"]
     bold = [i["text"]["content"] for i in items if i["annotations"]["bold"]]
     assert bold == ["важное"]
+
+
+@pytest.mark.asyncio
+async def test_network_failure_on_media_keeps_the_message():
+    """Связь с Telegram отвалилась на вложении — текст всё равно сохраняем.
+
+    Раньше TelegramNetworkError пролетал наружу и убивал всю запись целиком.
+    """
+    from aiogram.exceptions import TelegramNetworkError
+
+    class BrokenBot(FakeBot):
+        async def get_file(self, file_id):
+            raise TelegramNetworkError(method=None, message="Request timeout error")
+
+    notion = FakeNotion()
+    saver = Saver(notion, settings())
+    message = make_message(7, photo=photo("a", size=2048), caption="важный пост")
+
+    result = await saver.save(BrokenBot(), [message])
+
+    assert notion.created, "страница должна быть создана несмотря на сбой сети"
+    assert title_of(notion) == "важный пост"
+    callouts = [b for b in blocks_of(notion) if b["type"] == "callout"]
+    assert callouts, "о непрогруженном файле должна остаться заметка"
+    assert "связ" in callouts[0]["callout"]["rich_text"][0]["text"]["content"].lower()
+    assert result.notes

@@ -16,6 +16,7 @@ from bot.config import Settings, load_settings
 from bot.handlers import router
 from bot.notion import NotionClient, NotionError
 from bot.pipeline import Saver
+from bot.session import RetryingSession
 
 log = logging.getLogger("bot")
 
@@ -99,6 +100,7 @@ async def amain() -> int:
 
     bot = Bot(
         token=settings.telegram_bot_token,
+        session=RetryingSession(timeout=90.0),
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
     notion = NotionClient(settings.notion_token, settings.notion_database_id)

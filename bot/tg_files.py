@@ -16,6 +16,8 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import Message
 
+from bot.session import retry_call
+
 log = logging.getLogger(__name__)
 
 #: Жёсткий предел Bot API на скачивание файла.
@@ -221,6 +223,10 @@ async def download(bot: Bot, media: MediaRef, max_bytes: int) -> Download:
             return Download(reason=f"Telegram не отдаёт боту файлы больше 20 МБ ({media.human_size})")
         log.warning("getFile не удался для %s: %s", media.filename, exc)
         return Download(reason="Telegram не отдал файл")
+    except Exception as exc:  # noqa: BLE001 — сеть отвалилась даже после повторов
+        # Сообщение важнее вложения: сохраняем текст, а про файл пишем честно.
+        log.warning("getFile не удался для %s: %s", media.filename, exc)
+        return Download(reason="Telegram не ответил (проблемы со связью)")
 
     size = file.file_size or media.size
     if size and size > limit:
@@ -231,7 +237,11 @@ async def download(bot: Bot, media: MediaRef, max_bytes: int) -> Download:
         return Download(reason="Telegram не вернул путь к файлу")
 
     try:
-        buffer = await bot.download_file(file.file_path)
+        # download_file идёт мимо make_request, поэтому повтор здесь свой.
+        buffer = await retry_call(
+            f"Скачивание {media.filename}",
+            lambda: bot.download_file(file.file_path),
+        )
     except Exception as exc:  # noqa: BLE001 — сеть, таймауты, битые ссылки
         log.warning("Скачивание %s не удалось: %s", media.filename, exc)
         return Download(reason="не удалось скачать файл из Telegram")
