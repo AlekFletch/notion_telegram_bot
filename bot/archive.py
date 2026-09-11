@@ -15,9 +15,12 @@ from dataclasses import dataclass
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
-from aiogram.types import Message
+from aiogram.types import BufferedInputFile, Message
 
 log = logging.getLogger(__name__)
+
+#: Подпись к сообщению в Telegram — 1024 символа.
+CAPTION_LIMIT = 1024
 
 
 @dataclass
@@ -74,6 +77,51 @@ async def store(bot: Bot, message: Message, chat_id: int) -> Stored:
         return Stored(reason="не удалось переслать в архив (проблемы со связью)")
 
     url = tg_link(chat_id, copy.message_id)
+    if not url:
+        return Stored(reason="не удалось построить ссылку на архив")
+    return Stored(url=url)
+
+
+async def upload(
+    bot: Bot,
+    chat_id: int,
+    data: bytes,
+    filename: str,
+    *,
+    is_video: bool = False,
+    caption: str = "",
+) -> Stored:
+    """Положить в архив файл, скачанный не из Telegram, и вернуть ссылку.
+
+    Отличается от [store](archive.py) тем, что пересылать нечего: файл пришёл
+    из внешнего источника, и его надо именно отправить.
+    """
+    if not chat_id:
+        return Stored(reason="архив не настроен")
+
+    payload = BufferedInputFile(data, filename=filename)
+    short = caption[:CAPTION_LIMIT] if caption else None
+
+    try:
+        if is_video:
+            sent = await bot.send_video(
+                chat_id, video=payload, caption=short, supports_streaming=True
+            )
+        else:
+            sent = await bot.send_document(chat_id, document=payload, caption=short)
+    except TelegramForbiddenError as exc:
+        log.warning("Архив недоступен (%s): %s", chat_id, exc)
+        return Stored(reason="бот не может писать в канал-архив")
+    except TelegramBadRequest as exc:
+        log.warning("Отправка в архив не удалась (%s): %s", chat_id, exc)
+        if "too large" in str(exc).lower():
+            return Stored(reason="файл больше 50 МБ — столько бот отправить не может")
+        return Stored(reason="Telegram не принял файл в архив")
+    except Exception as exc:  # noqa: BLE001 — сеть отвалилась даже после повторов
+        log.warning("Отправка в архив не удалась (%s): %s", chat_id, exc)
+        return Stored(reason="не удалось отправить в архив (проблемы со связью)")
+
+    url = tg_link(chat_id, sent.message_id)
     if not url:
         return Stored(reason="не удалось построить ссылку на архив")
     return Stored(url=url)

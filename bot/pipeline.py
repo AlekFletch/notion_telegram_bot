@@ -10,6 +10,7 @@ from aiogram.types import Message
 from bot import archive
 from bot import formatting as fmt
 from bot import notion as api
+from bot import social
 from bot import tg_files
 from bot.article import Article, fetch_article
 from bot.config import Settings
@@ -108,6 +109,17 @@ def collect_text(messages: list[Message]) -> tuple[str, list]:
     return "", []
 
 
+def _post_title(post: social.Post | None) -> str | None:
+    """Заголовок поста: своё название либо первая строка подписи."""
+    if post is None:
+        return None
+    if post.title:
+        return post.title
+    if post.description:
+        return post.description.strip().splitlines()[0]
+    return None
+
+
 def _valid_url(url: str | None) -> str | None:
     if url and url.startswith(("http://", "https://")):
         return url
@@ -136,10 +148,14 @@ class Saver:
         media = [ref for _, ref in pairs]
         url = _valid_url(fmt.first_url(text, entities))
         source = describe_source(primary)
-        kind = self._kind(media, url)
 
+        post = await self._fetch_post(url)
+        kind = self._kind(media, url, post)
+
+        # На Instagram и Facebook trafilatura тратить нечего: страницы
+        # анонимному запросу не отдают ни текста, ни мета-тегов.
         article: Article | None = None
-        if url and self._settings.fetch_articles:
+        if url and self._settings.fetch_articles and post is None:
             article = await fetch_article(
                 url,
                 timeout=self._settings.article_timeout,
@@ -149,12 +165,12 @@ class Saver:
         title = fmt.build_title(
             kind=kind,
             text=text,
-            article_title=article.title if article else None,
+            article_title=_post_title(post) or (article.title if article else None),
             filename=media[0].filename if media else None,
             source=source,
         )
 
-        blocks, notes = await self._body(bot, text, entities, url, article, pairs)
+        blocks, notes = await self._body(bot, text, entities, url, article, pairs, post)
 
         properties = {
             "Название": api.title_property(title),
@@ -181,12 +197,35 @@ class Saver:
 
     # ------------------------------------------------------------------
 
+    async def _fetch_post(self, url: str | None) -> social.Post | None:
+        """Скачать пост из соцсети, если ссылка ведёт на поддерживаемый сайт."""
+        settings = self._settings
+        if not url or not settings.social_download:
+            return None
+        if not social.is_supported(url, settings.social_domains):
+            return None
+
+        return await social.fetch_post(
+            url,
+            cookies_file=settings.social_cookies_file,
+            max_items=settings.social_max_items,
+            timeout=settings.social_timeout,
+        )
+
     @staticmethod
-    def _kind(media: list[tg_files.MediaRef], url: str | None) -> str:
+    def _kind(
+        media: list[tg_files.MediaRef],
+        url: str | None = None,
+        post: social.Post | None = None,
+    ) -> str:
         if len(media) > 1:
             return "Альбом"
         if media:
             return media[0].kind_label
+        if post and post.ok:
+            if len(post.items) > 1:
+                return "Альбом"
+            return "Видео" if post.items[0].is_video else "Фото"
         if url:
             return "Ссылка"
         return "Текст"
@@ -199,6 +238,7 @@ class Saver:
         url: str | None,
         article: Article | None,
         pairs: list[tuple[Message, tg_files.MediaRef]],
+        post: social.Post | None = None,
     ) -> tuple[list[dict], list[str]]:
         blocks: list[dict] = fmt.message_blocks(text, entities)
         notes: list[str] = []
@@ -208,6 +248,11 @@ class Saver:
             blocks.append(block)
             if note:
                 notes.append(note)
+
+        if post is not None:
+            post_blocks, post_notes = await self._post_blocks(bot, post)
+            blocks.extend(post_blocks)
+            notes.extend(post_notes)
 
         if url:
             blocks.append(fmt.divider())
@@ -221,6 +266,50 @@ class Saver:
             blocks.extend(fmt.plain_paragraphs(article.text or ""))
         elif article and article.error:
             note = f"Текст статьи не сохранён: {article.error}"
+            blocks.append(fmt.callout(note, "\U0001f517"))
+            notes.append(note)
+
+        return blocks, notes
+
+    async def _post_blocks(
+        self, bot: Bot, post: social.Post
+    ) -> tuple[list[dict], list[str]]:
+        """Подпись поста и ссылки на его вложения, уехавшие в архив."""
+        blocks: list[dict] = []
+        notes: list[str] = []
+
+        if post.uploader:
+            blocks.append(fmt.callout(f"Автор: {post.uploader}", "\U0001f464"))
+
+        if post.description:
+            blocks.extend(fmt.plain_paragraphs(post.description))
+
+        chat_id = self._settings.archive_chat_id
+        caption = f"{post.uploader or 'Пост'} · {post.url}"
+
+        for number, item in enumerate(post.items, start=1):
+            stored = await archive.upload(
+                bot, chat_id, item.data, item.filename,
+                is_video=item.is_video, caption=caption,
+            )
+            label = f"Вложение {number} из {len(post.items)}" if len(post.items) > 1 else "Вложение"
+            if stored.ok:
+                icon = "\U0001f3ac" if item.is_video else "\U0001f5bc"
+                blocks.append(fmt.link_callout(
+                    f"{label} — смотреть в Telegram", stored.url or "", icon
+                ))
+            else:
+                note = f"{label} не сохранено — {stored.reason}"
+                blocks.append(fmt.callout(note, "\U0001f4e6"))
+                notes.append(note)
+
+        if post.skipped:
+            note = f"Вложений пропущено по размеру: {post.skipped}"
+            blocks.append(fmt.callout(note, "\U0001f4e6"))
+            notes.append(note)
+
+        if not post.ok and post.error:
+            note = f"Пост не скачан: {post.error}"
             blocks.append(fmt.callout(note, "\U0001f517"))
             notes.append(note)
 

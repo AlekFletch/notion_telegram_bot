@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+from pathlib import Path
 
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
@@ -36,6 +37,8 @@ HELP = (
     "• Повторная пересылка того же сообщения не создаёт дубль\n"
     "• Видео уезжает в канал-архив, а в Notion попадает ссылка на него — "
     "так сохраняются ролики любого размера\n"
+    "• Ссылка на пост в Instagram или Facebook — скачаю вложения и подпись, "
+    "видео тоже уедет в архив\n"
     "• Под каждой записью — кнопки категорий. Можно нажать сразу, "
     "можно позже: сообщение с кнопками никуда не денется\n\n"
     "<b>Команды</b>\n"
@@ -151,8 +154,30 @@ async def ping(message: Message, bot: Bot, settings: Settings, notion: NotionCli
         "✅ Notion на связи.\n"
         f"Лимит на файл: <b>{limit_mb:.0f} МБ</b>\n"
         f"Статьи по ссылкам: <b>{'да' if settings.fetch_articles else 'нет'}</b>\n"
-        f"{await _archive_status(bot, settings)}"
+        f"{await _archive_status(bot, settings)}\n"
+        f"{_social_status(settings)}"
     )
+
+
+def _social_status(settings: Settings) -> str:
+    """Строка для /ping: качаем ли посты из соцсетей и есть ли cookies."""
+    if not settings.social_download or not settings.social_domains:
+        return "Посты из соцсетей: <b>не качаем</b>"
+
+    sites = ", ".join(sorted(settings.social_domains))
+    if not settings.social_cookies_file:
+        return (
+            f"Посты из соцсетей: <b>{sites}</b>\n"
+            "⚠️ Cookies не заданы — Instagram почти наверняка потребует логин"
+        )
+
+    if not Path(settings.social_cookies_file).exists():
+        return (
+            f"Посты из соцсетей: <b>{sites}</b>\n"
+            f"⚠️ Файл cookies не найден: <code>{html.escape(settings.social_cookies_file)}</code>"
+        )
+
+    return f"Посты из соцсетей: <b>{sites}</b> (с cookies)"
 
 
 async def _archive_status(bot: Bot, settings: Settings) -> str:

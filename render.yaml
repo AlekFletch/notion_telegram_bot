@@ -23,3 +23,5 @@ services:
         sync: false
       - key: ARCHIVE_CHAT_ID
         sync: false
+      - key: SOCIAL_COOKIES_FILE
+        sync: false

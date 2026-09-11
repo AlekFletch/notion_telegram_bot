@@ -91,6 +91,26 @@ class FakeBot:
         )
         return FakeForward(1000 + len(self.forwarded))
 
+    async def send_video(self, chat_id, video, caption=None, **kwargs):
+        return self._sent(chat_id, video, caption, "video")
+
+    async def send_document(self, chat_id, document, caption=None, **kwargs):
+        return self._sent(chat_id, document, caption, "document")
+
+    def _sent(self, chat_id, payload, caption, how):
+        if self.forward_error:
+            raise self.forward_error
+        self.forwarded.append(
+            {
+                "chat_id": chat_id,
+                "how": how,
+                "filename": getattr(payload, "filename", None),
+                "size": len(getattr(payload, "data", b"")),
+                "caption": caption,
+            }
+        )
+        return FakeForward(1000 + len(self.forwarded))
+
 
 def settings(**overrides) -> Settings:
     base = dict(

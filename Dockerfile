@@ -6,6 +6,12 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
+# ffmpeg нужен yt-dlp, когда сайт отдаёт видео и звук раздельными
+# потоками — без него такой пост скачается без звука или не скачается.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 

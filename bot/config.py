@@ -44,6 +44,17 @@ class Settings(BaseSettings):
     article_max_chars: int = 40_000
     article_timeout: float = 10.0
 
+    # Посты из соцсетей: качаем вложения через yt-dlp и кладём в архив.
+    # Instagram и Facebook анонимному запросу не отдают ничего, поэтому
+    # обычный разбор статьи на таких ссылках бесполезен.
+    social_download: bool = True
+    social_hosts: str = "instagram.com,instagr.am,facebook.com,fb.watch"
+    # Путь к cookies в формате Netscape. На Render это Secret File,
+    # то есть /etc/secrets/<имя файла>. Без них Instagram требует логин.
+    social_cookies_file: str = ""
+    social_max_items: int = 10
+    social_timeout: float = 30.0
+
     log_level: str = "INFO"
 
     @field_validator("archive_chat_id", mode="before")
@@ -53,6 +64,12 @@ class Settings(BaseSettings):
         if isinstance(value, str) and not value.strip():
             return 0
         return value
+
+    @cached_property
+    def social_domains(self) -> frozenset[str]:
+        from bot.social import hosts_from
+
+        return hosts_from(self.social_hosts)
 
     @cached_property
     def allowed_ids(self) -> frozenset[int]:
