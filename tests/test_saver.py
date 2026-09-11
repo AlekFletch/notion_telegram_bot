@@ -57,18 +57,39 @@ class FakeFile:
         self.file_size = size
 
 
+class FakeForward:
+    def __init__(self, message_id: int):
+        self.message_id = message_id
+
+
 class FakeBot:
-    """Минимальный Bot: отдаёт заранее заданное содержимое файла."""
+    """Минимальный Bot: отдаёт заранее заданное содержимое файла.
+
+    Умеет и пересылать в архив — запоминает вызовы, чтобы тест мог проверить,
+    что видео ушло в канал, а файл при этом не скачивался.
+    """
 
     def __init__(self, *, size: int = 1024, payload: bytes = b"x" * 1024):
         self.size = size
         self.payload = payload
+        self.downloaded: list[str] = []
+        self.forwarded: list[dict] = []
+        self.forward_error: Exception | None = None
 
     async def get_file(self, file_id):
+        self.downloaded.append(file_id)
         return FakeFile(f"photos/{file_id}.jpg", self.size)
 
     async def download_file(self, path):
         return io.BytesIO(self.payload)
+
+    async def forward_message(self, chat_id, from_chat_id, message_id):
+        if self.forward_error:
+            raise self.forward_error
+        self.forwarded.append(
+            {"chat_id": chat_id, "from_chat_id": from_chat_id, "message_id": message_id}
+        )
+        return FakeForward(1000 + len(self.forwarded))
 
 
 def settings(**overrides) -> Settings:

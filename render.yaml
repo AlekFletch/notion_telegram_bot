@@ -21,3 +21,5 @@ services:
         sync: false
       - key: ALLOWED_USER_IDS
         sync: false
+      - key: ARCHIVE_CHAT_ID
+        sync: false

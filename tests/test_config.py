@@ -71,3 +71,24 @@ def test_webhook_mode_requires_base_url():
 def test_webhook_url_is_assembled_without_double_slash():
     s = settings(mode="webhook", base_webhook_url="https://x.onrender.com/")
     assert s.webhook_url == "https://x.onrender.com/tg/webhook"
+
+
+def test_empty_archive_id_means_disabled():
+    """В .env переменная может стоять пустой — это «выключено», а не ошибка."""
+    settings = Settings(
+        telegram_bot_token="1:a",
+        notion_token="n",
+        notion_database_id="d",
+        archive_chat_id="",
+    )
+    assert settings.archive_chat_id == 0
+
+
+def test_archive_id_is_read_as_number():
+    settings = Settings(
+        telegram_bot_token="1:a",
+        notion_token="n",
+        notion_database_id="d",
+        archive_chat_id="-1001234567890",
+    )
+    assert settings.archive_chat_id == -1001234567890

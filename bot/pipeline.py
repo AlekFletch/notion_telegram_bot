@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from aiogram import Bot
 from aiogram.types import Message
 
+from bot import archive
 from bot import formatting as fmt
 from bot import notion as api
 from bot import tg_files
@@ -87,16 +88,7 @@ def original_link(message: Message) -> str | None:
         return None
 
     chat = origin.chat
-    message_id = origin.message_id
-    if chat.username:
-        return f"https://t.me/{chat.username}/{message_id}"
-
-    # Приватный канал: ссылка вида t.me/c/<internal_id>/<msg> откроется
-    # у того, кто на канал подписан — то есть у владельца бота.
-    internal = str(chat.id)
-    if internal.startswith("-100"):
-        return f"https://t.me/c/{internal[4:]}/{message_id}"
-    return None
+    return archive.tg_link(chat.id, origin.message_id, chat.username)
 
 
 def _message_text(message: Message) -> str:
@@ -138,7 +130,10 @@ class Saver:
             return SaveResult(url=existing, title="", kind="", duplicate=True)
 
         text, entities = collect_text(messages)
-        media = [ref for ref in (tg_files.extract_media(m) for m in messages) if ref]
+        # Пары, а не просто вложения: чтобы переслать файл в архив, нужно
+        # исходное сообщение, а не только file_id.
+        pairs = [(m, ref) for m in messages if (ref := tg_files.extract_media(m))]
+        media = [ref for _, ref in pairs]
         url = _valid_url(fmt.first_url(text, entities))
         source = describe_source(primary)
         kind = self._kind(media, url)
@@ -159,7 +154,7 @@ class Saver:
             source=source,
         )
 
-        blocks, notes = await self._body(bot, messages, text, entities, url, article, media)
+        blocks, notes = await self._body(bot, text, entities, url, article, pairs)
 
         properties = {
             "Название": api.title_property(title),
@@ -199,18 +194,17 @@ class Saver:
     async def _body(
         self,
         bot: Bot,
-        messages: list[Message],
         text: str,
         entities: list,
         url: str | None,
         article: Article | None,
-        media: list[tg_files.MediaRef],
+        pairs: list[tuple[Message, tg_files.MediaRef]],
     ) -> tuple[list[dict], list[str]]:
         blocks: list[dict] = fmt.message_blocks(text, entities)
         notes: list[str] = []
 
-        for ref in media:
-            block, note = await self._media_block(bot, ref)
+        for message, ref in pairs:
+            block, note = await self._media_block(bot, message, ref)
             blocks.append(block)
             if note:
                 notes.append(note)
@@ -232,18 +226,62 @@ class Saver:
 
         return blocks, notes
 
-    async def _media_block(self, bot: Bot, ref: tg_files.MediaRef) -> tuple[dict, str | None]:
+    async def _media_block(
+        self, bot: Bot, message: Message, ref: tg_files.MediaRef
+    ) -> tuple[dict, str | None]:
+        """Блок для вложения: файл внутри страницы или ссылка на архив.
+
+        Видео идёт в архив сразу — скачивать его почти всегда бессмысленно,
+        Bot API не отдаёт больше 20 МБ. Всё остальное сначала пробует попасть
+        внутрь страницы, а в архив уходит только если не получилось.
+        """
+        archived = False
+        archive_reason: str | None = None
+
+        if ref.block_kind == "video":
+            block, archive_reason = await self._archive_block(bot, message, ref)
+            if block:
+                return block, None
+            archived = True   # второй раз пересылать то же самое незачем
+
         result = await tg_files.download(bot, ref, self._notion.max_upload_bytes)
+        reason = result.reason or ""
 
-        if not result.ok:
-            note = f"{ref.filename}: {result.reason}"
-            return fmt.callout(f"Файл не загружен — {note}", "\U0001f4e6"), note
+        if result.ok:
+            try:
+                uploaded = await self._notion.upload(
+                    ref.filename, ref.mime, result.data or b""
+                )
+                return api.file_block(ref.block_kind, uploaded.id), None
+            except api.NotionError as exc:
+                log.warning("Notion отклонил %s: %s", ref.filename, exc.notion_message)
+                reason = f"Notion отклонил загрузку ({exc.notion_message})"
 
-        try:
-            uploaded = await self._notion.upload(ref.filename, ref.mime, result.data or b"")
-        except api.NotionError as exc:
-            note = f"{ref.filename}: Notion отклонил загрузку ({exc.notion_message})"
-            log.warning(note)
-            return fmt.callout(f"Файл не загружен — {note}", "\U0001f4e6"), note
+        # Внутрь страницы файл не попал — пробуем хотя бы сохранить ссылку.
+        if not archived:
+            block, archive_reason = await self._archive_block(bot, message, ref)
+            if block:
+                return block, None
 
-        return api.file_block(ref.block_kind, uploaded.id), None
+        note = f"{ref.filename}: {reason}"
+        # Почему не спас и архив — тоже пишем в заметку, иначе «бот не админ
+        # канала» будет видно только в логах Render.
+        if archive_reason:
+            note = f"{note}; в архив тоже не ушло — {archive_reason}"
+        return fmt.callout(f"Файл не загружен — {note}", "\U0001f4e6"), note
+
+    async def _archive_block(
+        self, bot: Bot, message: Message, ref: tg_files.MediaRef
+    ) -> tuple[dict | None, str | None]:
+        """Переслать вложение в канал-архив и вернуть карточку со ссылкой."""
+        chat_id = self._settings.archive_chat_id
+        if not chat_id:
+            return None, None
+
+        stored = await archive.store(bot, message, chat_id)
+        if not stored.ok:
+            return None, stored.reason
+
+        icon = "\U0001f3ac" if ref.block_kind == "video" else "\U0001f4ce"
+        caption = f"{ref.filename} ({ref.human_size}) — смотреть в Telegram"
+        return fmt.link_callout(caption, stored.url or "", icon), None

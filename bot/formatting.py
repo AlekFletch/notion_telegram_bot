@@ -243,6 +243,24 @@ def callout(text: str, emoji: str = "⚠️") -> dict:
     }
 
 
+def link_callout(text: str, url: str, emoji: str = "🎬") -> dict:
+    """Карточка, весь текст которой — ссылка.
+
+    Для архива в приватном канале это лучше, чем bookmark: превью с t.me/c/…
+    Notion всё равно не вытянет, зато у карточки есть иконка и видно, что
+    файл лежит не внутри страницы.
+    """
+    return {
+        "object": "block",
+        "type": "callout",
+        "callout": {
+            "rich_text": [_text_item(text[:TEXT_LIMIT], {}, url)],
+            "icon": {"type": "emoji", "emoji": emoji},
+            "color": "gray_background",
+        },
+    }
+
+
 def bookmark(url: str) -> dict:
     return {"object": "block", "type": "bookmark", "bookmark": {"url": url}}
 

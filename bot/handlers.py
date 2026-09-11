@@ -34,6 +34,8 @@ HELP = (
     "• Форматирование, ссылки и код сохраняются\n"
     "• Из ссылки подтягиваю заголовок и текст статьи\n"
     "• Повторная пересылка того же сообщения не создаёт дубль\n"
+    "• Видео уезжает в канал-архив, а в Notion попадает ссылка на него — "
+    "так сохраняются ролики любого размера\n"
     "• Под каждой записью — кнопки категорий. Можно нажать сразу, "
     "можно позже: сообщение с кнопками никуда не денется\n\n"
     "<b>Команды</b>\n"
@@ -128,7 +130,7 @@ async def id_command(message: Message) -> None:
 
 
 @router.message(Command("ping"))
-async def ping(message: Message, settings: Settings, notion: NotionClient) -> None:
+async def ping(message: Message, bot: Bot, settings: Settings, notion: NotionClient) -> None:
     if not _allowed(message, settings):
         await _deny(message)
         return
@@ -148,7 +150,42 @@ async def ping(message: Message, settings: Settings, notion: NotionClient) -> No
     await message.answer(
         "✅ Notion на связи.\n"
         f"Лимит на файл: <b>{limit_mb:.0f} МБ</b>\n"
-        f"Статьи по ссылкам: <b>{'да' if settings.fetch_articles else 'нет'}</b>"
+        f"Статьи по ссылкам: <b>{'да' if settings.fetch_articles else 'нет'}</b>\n"
+        f"{await _archive_status(bot, settings)}"
+    )
+
+
+async def _archive_status(bot: Bot, settings: Settings) -> str:
+    """Строка для /ping: виден ли боту канал-архив."""
+    if not settings.archive_chat_id:
+        return (
+            "Архив видео: <b>не настроен</b> — видео крупнее 20 МБ сохранить нельзя. "
+            "Создай приватный канал, добавь меня админом и впиши его ID "
+            "в <code>ARCHIVE_CHAT_ID</code>."
+        )
+
+    try:
+        chat = await bot.get_chat(settings.archive_chat_id)
+    except Exception as exc:  # noqa: BLE001 — нас интересует любой отказ
+        log.warning("Архив недоступен: %s", exc)
+        return (
+            "Архив видео: <b>бот не видит канал</b> — проверь, что он добавлен "
+            "туда администратором."
+        )
+
+    return f"Архив видео: <b>{html.escape(chat.title or 'канал')}</b>"
+
+
+@router.channel_post(Command("id"))
+async def channel_id(message: Message) -> None:
+    """Узнать ID канала-архива, не привлекая сторонних ботов.
+
+    Бот получает посты канала, только если он там администратор — то есть
+    ровно в том состоянии, которое и нужно архиву.
+    """
+    await message.answer(
+        f"ID этого канала: <code>{message.chat.id}</code>\n\n"
+        "Впиши его в переменную <code>ARCHIVE_CHAT_ID</code>."
     )
 
 

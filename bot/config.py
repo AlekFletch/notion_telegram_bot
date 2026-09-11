@@ -7,7 +7,7 @@ import re
 from functools import cached_property
 from typing import Literal
 
-from pydantic import model_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 #: Что Telegram разрешает в secret_token вебхука.
@@ -36,11 +36,23 @@ class Settings(BaseSettings):
     webhook_secret: str = ""
     port: int = 10000
 
+    # Приватный канал, куда бот пересылает видео и всё, что не влезло в Notion.
+    # Идентификатор вида -100…; 0 = архив выключен, поведение как раньше.
+    archive_chat_id: int = 0
+
     fetch_articles: bool = True
     article_max_chars: int = 40_000
     article_timeout: float = 10.0
 
     log_level: str = "INFO"
+
+    @field_validator("archive_chat_id", mode="before")
+    @classmethod
+    def _empty_archive_is_off(cls, value):
+        """Пустая строка в .env — это «выключено», а не повод падать на старте."""
+        if isinstance(value, str) and not value.strip():
+            return 0
+        return value
 
     @cached_property
     def allowed_ids(self) -> frozenset[int]:
